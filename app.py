@@ -1,15 +1,23 @@
 import streamlit as st
 import pandas as pd
-import sqlite3, hashlib, re, os, joblib
+import sqlite3, hashlib, re, os
 from datetime import datetime
 import plotly.express as px
 
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
+# =========================
+# IMPORTS SEGUROS (IA)
+# =========================
+try:
+    import joblib
+    from sklearn.model_selection import train_test_split
+    from sklearn.pipeline import Pipeline
+    from sklearn.compose import ColumnTransformer
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.ensemble import RandomForestClassifier
+    SKLEARN_OK = True
+except:
+    SKLEARN_OK = False
 
 st.set_page_config(layout="wide")
 
@@ -17,7 +25,9 @@ st.set_page_config(layout="wide")
 # DB
 # =========================
 def get_conn():
-    return sqlite3.connect("licitaciones.db", check_same_thread=False)
+    conn = sqlite3.connect("licitaciones.db", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def crear_db():
     conn = get_conn()
@@ -52,6 +62,10 @@ def crear_db():
         resultado TEXT
     )""")
 
+    # 🔧 FIX BD antigua
+    try: c.execute("ALTER TABLE usuarios ADD COLUMN empresa TEXT")
+    except: pass
+
     conn.commit()
     conn.close()
 
@@ -60,21 +74,25 @@ crear_db()
 # =========================
 # SEGURIDAD
 # =========================
-def hash_password(p): return hashlib.sha256(p.encode()).hexdigest()
+def hash_password(p):
+    return hashlib.sha256(p.encode()).hexdigest()
 
 def crear_usuario(u,p,rol,email,empresa):
-    conn=get_conn()
+    conn = get_conn()
     try:
         conn.execute("INSERT INTO usuarios VALUES (?,?,?,?,?)",
                      (u,hash_password(p),rol,email,empresa))
         conn.commit()
-    except: pass
+    except:
+        pass
     conn.close()
 
 def login(u,p):
-    conn=get_conn()
-    user=conn.execute("SELECT * FROM usuarios WHERE username=? AND password=?",
-                      (u,hash_password(p))).fetchone()
+    conn = get_conn()
+    user = conn.execute(
+        "SELECT * FROM usuarios WHERE username=? AND password=?",
+        (u,hash_password(p))
+    ).fetchone()
     conn.close()
     return user
 
@@ -84,76 +102,80 @@ crear_usuario("admin","1234","admin","admin@mail.com","ADMIN")
 # UTILIDADES
 # =========================
 def limpiar_evento(t):
-    t=re.sub(r"\(.*?\)","",t)
-    t=re.sub(r"\d+.*?d[ií]as.*?","",t)
+    t = re.sub(r"\(.*?\)", "", t)
+    t = re.sub(r"\d+.*?d[ií]as.*?", "", t)
     return t.strip()
 
 def extraer_fecha(t):
-    m=re.search(r"\d{2}/\d{2}/\d{4}",t)
-    return datetime.strptime(m.group(),"%d/%m/%Y") if m else None
+    m = re.search(r"\d{2}/\d{2}/\d{4}", t)
+    return datetime.strptime(m.group(), "%d/%m/%Y") if m else None
 
 def dias_restantes(f):
-    return (f-datetime.now()).days if f else None
-
-def estado(d):
-    if d is None:return "Sin fecha"
-    if d<0:return "Vencido"
-    if d<=3:return "Próximo"
-    return "En curso"
+    return (f - datetime.now()).days if f else None
 
 # =========================
 # IA
 # =========================
-MODEL="modelo.pkl"
+MODEL = "modelo.pkl"
 
 def entrenar(conn):
-    df=pd.read_sql("""
+    if not SKLEARN_OK:
+        return None
+
+    df = pd.read_sql("""
     SELECT p.valor, p.objeto, h.resultado
     FROM historial h JOIN procesos p ON h.id_proceso=p.id
     WHERE h.resultado IS NOT NULL
-    """,conn)
+    """, conn)
 
-    if df.empty:return None
+    if df.empty:
+        return None
 
-    df["target"]=df["resultado"].apply(lambda x:1 if x=="Ganado" else 0)
+    df["target"] = df["resultado"].apply(lambda x: 1 if x=="Ganado" else 0)
 
-    X=df[["valor","objeto"]]
-    y=df["target"]
+    X = df[["valor","objeto"]]
+    y = df["target"]
 
-    prep=ColumnTransformer([
-        ("num",StandardScaler(),["valor"]),
-        ("txt",TfidfVectorizer(max_features=50),"objeto")
+    prep = ColumnTransformer([
+        ("num", StandardScaler(), ["valor"]),
+        ("txt", TfidfVectorizer(max_features=50), "objeto")
     ])
 
-    model=Pipeline([("prep",prep),("clf",RandomForestClassifier())])
+    model = Pipeline([
+        ("prep", prep),
+        ("clf", RandomForestClassifier())
+    ])
 
-    Xtr,Xte,ytr,yte=train_test_split(X,y,test_size=0.2)
+    Xtr,Xte,ytr,yte = train_test_split(X,y,test_size=0.2)
     model.fit(Xtr,ytr)
 
-    joblib.dump(model,MODEL)
+    joblib.dump(model, MODEL)
     return model.score(Xte,yte)
 
 def cargar_modelo():
+    if not SKLEARN_OK:
+        return None
     return joblib.load(MODEL) if os.path.exists(MODEL) else None
 
 # =========================
 # LOGIN
 # =========================
 if "login" not in st.session_state:
-    st.session_state.login=False
+    st.session_state.login = False
 
 if not st.session_state.login:
     st.title("Login")
-    u=st.text_input("Usuario")
-    p=st.text_input("Contraseña",type="password")
+
+    u = st.text_input("Usuario")
+    p = st.text_input("Contraseña", type="password")
 
     if st.button("Entrar"):
-        user=login(u,p)
+        user = login(u,p)
         if user:
-            st.session_state.login=True
-            st.session_state.user=user[0]
-            st.session_state.rol=user[2]
-            st.session_state.empresa=user[4]
+            st.session_state.login = True
+            st.session_state.user = user["username"]
+            st.session_state.rol = user["rol"]
+            st.session_state.empresa = user["empresa"] if user["empresa"] else "DEFAULT"
             st.rerun()
 
     st.stop()
@@ -161,99 +183,76 @@ if not st.session_state.login:
 # =========================
 # MENU
 # =========================
-menu=st.sidebar.radio("Menú",
+menu = st.sidebar.radio("Menú",
 ["Dashboard","Procesos","Cronograma","Usuarios","Listado"])
 
-conn=get_conn()
+conn = get_conn()
 
 # =========================
-# DASHBOARD GERENCIAL
+# DASHBOARD
 # =========================
-if menu=="Dashboard":
+if menu == "Dashboard":
 
     st.title("💰 Dashboard Gerencial")
 
-    df=pd.read_sql(f"""
+    df = pd.read_sql(f"""
     SELECT * FROM procesos
     WHERE empresa='{st.session_state.empresa}'
-    """,conn)
+    """, conn)
 
     if not df.empty:
+        st.metric("Valor total", f"${df['valor'].sum():,.0f}")
 
-        total=df["valor"].sum()
-        promedio=df["valor"].mean()
-
-        col1,col2=st.columns(2)
-        col1.metric("💰 Valor total en juego",f"${total:,.0f}")
-        col2.metric("📊 Valor promedio",f"${promedio:,.0f}")
-
-        st.subheader("📊 Ranking por valor")
-        df2=df.sort_values("valor",ascending=False)
-
-        fig=px.bar(df2,x="valor",y="objeto",orientation="h")
-        st.plotly_chart(fig,use_container_width=True)
+        fig = px.bar(df.sort_values("valor"), x="valor", y="objeto", orientation="h")
+        st.plotly_chart(fig, use_container_width=True)
 
 # =========================
 # PROCESOS
 # =========================
-if menu=="Procesos":
-    st.title("Nuevo proceso")
+if menu == "Procesos":
 
     with st.form("f"):
-        idp=st.text_input("ID")
-        obj=st.text_area("Objeto")
-        val=st.number_input("Valor",0.0)
+        idp = st.text_input("ID")
+        obj = st.text_area("Objeto")
+        val = st.number_input("Valor", 0.0)
 
         if st.form_submit_button("Guardar"):
             conn.execute("INSERT INTO procesos VALUES (?,?,?,?,?,?)",
-                         (idp,st.session_state.empresa,obj,"",val,st.session_state.user))
+                         (idp, st.session_state.empresa, obj, "", val, st.session_state.user))
             conn.commit()
-            st.success("Guardado")
+            st.success("Proceso guardado")
 
 # =========================
-# CRONOGRAMA COMPLETO
+# CRONOGRAMA
 # =========================
-if menu=="Cronograma":
+if menu == "Cronograma":
 
-    st.title("Cronograma completo")
-
-    idp=st.text_input("ID proceso")
-    txt=st.text_area("Pegar cronograma")
+    idp = st.text_input("ID proceso")
+    txt = st.text_area("Pegar cronograma")
 
     if st.button("Procesar"):
-
         for l in txt.split("\n"):
-            ev=limpiar_evento(l)
-            f=extraer_fecha(l)
-
+            ev = limpiar_evento(l)
+            f = extraer_fecha(l)
             if ev and f:
                 conn.execute("INSERT INTO cronograma VALUES (?,?,?)",(idp,ev,f))
-
         conn.commit()
 
-    cron=pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{idp}'",conn)
+    cron = pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{idp}'", conn)
 
     if not cron.empty:
-
-        cron["fecha"]=pd.to_datetime(cron["fecha"])
-        cron["dias"]=cron["fecha"].apply(dias_restantes)
-        cron["estado"]=cron["dias"].apply(estado)
-
-        st.dataframe(cron)
-
-        fig=px.timeline(cron,x_start="fecha",x_end="fecha",y="evento",color="estado")
-        st.plotly_chart(fig,use_container_width=True)
+        cron["fecha"] = pd.to_datetime(cron["fecha"])
+        fig = px.timeline(cron, x_start="fecha", x_end="fecha", y="evento")
+        st.plotly_chart(fig)
 
 # =========================
-# USUARIOS (ADMIN)
+# USUARIOS
 # =========================
-if menu=="Usuarios" and st.session_state.rol=="admin":
+if menu == "Usuarios" and st.session_state.rol == "admin":
 
-    st.title("Usuarios")
-
-    u=st.text_input("Usuario")
-    p=st.text_input("Clave",type="password")
-    e=st.text_input("Empresa")
+    u = st.text_input("Usuario")
+    p = st.text_input("Clave", type="password")
+    e = st.text_input("Empresa")
 
     if st.button("Crear"):
         crear_usuario(u,p,"invitado","",e)
@@ -262,33 +261,35 @@ if menu=="Usuarios" and st.session_state.rol=="admin":
 # =========================
 # LISTADO + IA
 # =========================
-if menu=="Listado":
+if menu == "Listado":
 
-    df=pd.read_sql(f"""
+    df = pd.read_sql(f"""
     SELECT * FROM procesos
     WHERE empresa='{st.session_state.empresa}'
-    """,conn)
+    """, conn)
 
     st.dataframe(df)
 
+    if not SKLEARN_OK:
+        st.warning("Instala scikit-learn y joblib para activar IA")
+
     if st.button("Entrenar IA"):
-        s=entrenar(conn)
-        if s: st.success(f"Modelo {round(s*100,2)}%")
+        score = entrenar(conn)
+        if score:
+            st.success(f"Modelo entrenado: {round(score*100,2)}%")
 
-    model=cargar_modelo()
+    model = cargar_modelo()
 
-    for _,row in df.iterrows():
-
-        cron=pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{row['id']}'",conn)
+    for _, row in df.iterrows():
 
         if model:
-            prob=model.predict_proba(pd.DataFrame([{
-                "valor":row["valor"],
-                "objeto":row["objeto"]
+            prob = model.predict_proba(pd.DataFrame([{
+                "valor": row["valor"],
+                "objeto": row["objeto"]
             }]))[0][1]
 
             st.write(row["objeto"])
             st.progress(prob)
-            st.write(f"{int(prob*100)}% probabilidad")
+            st.write(f"{int(prob*100)}%")
 
 conn.close()
