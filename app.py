@@ -211,14 +211,35 @@ if menu == "Dashboard":
 # =========================
 if menu == "Procesos":
 
-    with st.form("f"):
+    st.title("📁 Nuevo proceso")
+
+    with st.form("form_proceso"):
+
         idp = st.text_input("ID")
-        obj = st.text_area("Objeto")
-        val = st.number_input("Valor", 0.0)
+        objeto = st.text_area("Objeto")
+
+        tipo = st.selectbox("Tipo de proceso", [
+            "Licitación pública",
+            "Selección abreviada",
+            "Contratación directa",
+            "Mínima cuantía"
+        ])
+
+        valor = st.number_input("Valor", 0.0)
 
         if st.form_submit_button("Guardar"):
-            conn.execute("INSERT INTO procesos VALUES (?,?,?,?,?,?)",
-                         (idp, st.session_state.empresa, obj, "", val, st.session_state.user))
+
+            conn.execute("""
+            INSERT INTO procesos VALUES (?,?,?,?,?,?)
+            """, (
+                idp,
+                st.session_state.empresa,
+                objeto,
+                tipo,
+                valor,
+                st.session_state.user
+            ))
+
             conn.commit()
             st.success("Proceso guardado")
 
@@ -227,23 +248,64 @@ if menu == "Procesos":
 # =========================
 if menu == "Cronograma":
 
+    st.title("📅 Cronograma")
+
     idp = st.text_input("ID proceso")
     txt = st.text_area("Pegar cronograma")
 
     if st.button("Procesar"):
+
         for l in txt.split("\n"):
             ev = limpiar_evento(l)
             f = extraer_fecha(l)
+
             if ev and f:
-                conn.execute("INSERT INTO cronograma VALUES (?,?,?)",(idp,ev,f))
+                conn.execute(
+                    "INSERT INTO cronograma VALUES (?,?,?)",
+                    (idp, ev, f)
+                )
+
         conn.commit()
+        st.success("Cronograma guardado")
 
     cron = pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{idp}'", conn)
 
     if not cron.empty:
+
         cron["fecha"] = pd.to_datetime(cron["fecha"])
-        fig = px.timeline(cron, x_start="fecha", x_end="fecha", y="evento")
-        st.plotly_chart(fig)
+        cron = cron.sort_values("fecha")
+
+        # 🔥 GENERAR INICIO Y FIN (tipo proyecto)
+        cron["inicio"] = cron["fecha"]
+        cron["fin"] = cron["fecha"].shift(-1)
+
+        # última fila
+        cron["fin"] = cron["fin"].fillna(cron["fecha"])
+
+        # estado
+        hoy = datetime.now()
+        cron["estado"] = cron["fin"].apply(
+            lambda x: "🔴 Vencido" if x < hoy else ("🟡 Próximo" if (x - hoy).days <= 3 else "🟢 En curso")
+        )
+
+        st.subheader("📊 Diagrama de Gantt")
+
+        fig = px.timeline(
+            cron,
+            x_start="inicio",
+            x_end="fin",
+            y="evento",
+            color="estado",
+            color_discrete_map={
+                "🔴 Vencido": "red",
+                "🟡 Próximo": "orange",
+                "🟢 En curso": "green"
+            }
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.dataframe(cron)
 
 # =========================
 # USUARIOS
@@ -291,5 +353,30 @@ if menu == "Listado":
             st.write(row["objeto"])
             st.progress(prob)
             st.write(f"{int(prob*100)}%")
+            if menu == "Listado":
+
+    df = pd.read_sql(f"""
+    SELECT * FROM procesos
+    WHERE empresa='{st.session_state.empresa}'
+    """, conn)
+
+    st.dataframe(df)
+
+    st.subheader("🗑️ Eliminar proceso")
+
+    if not df.empty:
+
+        sel = st.selectbox("Seleccionar proceso", df["id"])
+
+        if st.button("Eliminar proceso"):
+
+            conn.execute("DELETE FROM procesos WHERE id=?", (sel,))
+            conn.execute("DELETE FROM cronograma WHERE id_proceso=?", (sel,))
+            conn.execute("DELETE FROM historial WHERE id_proceso=?", (sel,))
+
+            conn.commit()
+
+            st.success("Proceso eliminado")
+            st.rerun()
 
 conn.close()
