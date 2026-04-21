@@ -11,19 +11,21 @@ from email.mime.text import MIMEText
 st.set_page_config(page_title="Sistema Licitaciones", layout="wide")
 
 # =========================
-# ESTILOS
+# 🎨 ESTILO VERDE PRO
 # =========================
 st.markdown("""
 <style>
-.block-container {padding-top: 1.5rem;}
-.kpi {border-radius: 14px; padding: 14px 18px; background: #0f172a; color: #e5e7eb;}
-.kpi h4 {margin:0; font-size: 0.9rem; color:#94a3b8}
+.block-container {padding-top: 1rem;}
+.kpi {border-radius: 12px; padding: 15px; background: #064e3b; color: white;}
+.kpi h4 {margin:0; font-size: 0.9rem; color:#a7f3d0}
 .kpi h2 {margin:0; font-size: 1.6rem;}
+.stButton>button {background-color:#16a34a; color:white;}
+.stButton>button:hover {background-color:#15803d;}
 </style>
 """, unsafe_allow_html=True)
 
 # =========================
-# BASE DE DATOS
+# DB
 # =========================
 def get_conn():
     return sqlite3.connect("licitaciones.db", check_same_thread=False)
@@ -80,10 +82,10 @@ def crear_usuario(u,p,rol,email):
 
 def verificar_usuario(u,p):
     conn = get_conn()
-    df = conn.execute("SELECT * FROM usuarios WHERE username=? AND password=?",
-                      (u,hash_password(p))).fetchone()
+    user = conn.execute("SELECT * FROM usuarios WHERE username=? AND password=?",
+                        (u,hash_password(p))).fetchone()
     conn.close()
-    return df
+    return user
 
 crear_usuario("admin","1234","admin","tucorreo@gmail.com")
 
@@ -109,31 +111,31 @@ def enviar_correo(destino, asunto, mensaje):
         pass
 
 # =========================
-# FUNCIONES CRONOGRAMA
+# CRONOGRAMA
 # =========================
-def limpiar_evento(texto):
-    texto = re.sub(r"\(.*?\)", "", texto)
-    texto = re.sub(r"\d+.*?(d[ií]as|horas).*?(terminar|transcurrido)", "", texto)
-    return texto.strip()
+def limpiar_evento(t):
+    t = re.sub(r"\(.*?\)", "", t)
+    t = re.sub(r"\d+.*?(d[ií]as|horas).*?(terminar|transcurrido)", "", t)
+    return t.strip()
 
-def extraer_fecha(texto):
-    m = re.search(r"\d{2}/\d{2}/\d{4}", texto)
+def extraer_fecha(t):
+    m = re.search(r"\d{2}/\d{2}/\d{4}", t)
     return datetime.strptime(m.group(), "%d/%m/%Y") if m else None
 
-def dias_restantes(fecha):
-    return (fecha - datetime.now()).days if fecha else None
+def dias_restantes(f):
+    return (f - datetime.now()).days if f else None
 
-def estado_proceso(dias):
-    if dias is None: return "Sin fecha"
-    elif dias < 0: return "🔴 Vencido"
-    elif dias <= 3: return "🟡 Próximo"
-    else: return "🟢 En curso"
+def estado(d):
+    if d is None: return "Sin fecha"
+    if d < 0: return "🔴 Vencido"
+    if d <= 3: return "🟡 Próximo"
+    return "🟢 En curso"
 
-def generar_alertas(df, correo):
+def generar_alertas(df, correo, objeto):
     alertas = []
     for _, r in df.iterrows():
         if r["dias"] is not None and r["dias"] <= 3:
-            msg = f"{r['evento']} | {r['fecha']} | {r['dias']} días"
+            msg = f"{objeto} | {r['evento']} | {r['dias']} días"
             alertas.append(msg)
             enviar_correo(correo, "Alerta Licitación", msg)
     return alertas
@@ -166,7 +168,7 @@ if not st.session_state.login:
 # SIDEBAR
 # =========================
 st.sidebar.title(f"👤 {st.session_state.usuario}")
-menu = st.sidebar.radio("Menú", ["Dashboard","Procesos","Cronograma"])
+menu = st.sidebar.radio("Menú", ["Dashboard","Procesos","Cronograma","Usuarios","Listado"])
 
 # =========================
 # ADMIN
@@ -175,6 +177,7 @@ if st.session_state.rol == "admin":
 
     conn = get_conn()
 
+    # DASHBOARD
     if menu == "Dashboard":
         st.title("📊 Dashboard")
 
@@ -184,14 +187,18 @@ if st.session_state.rol == "admin":
             cron["fecha"] = pd.to_datetime(cron["fecha"])
             cron["dias"] = cron["fecha"].apply(dias_restantes)
 
-            col1, col2, col3 = st.columns(3)
+            col1,col2,col3 = st.columns(3)
+
             col1.markdown(f"<div class='kpi'><h4>Total eventos</h4><h2>{len(cron)}</h2></div>", unsafe_allow_html=True)
             col2.markdown(f"<div class='kpi'><h4>Próximos</h4><h2>{(cron['dias']<=3).sum()}</h2></div>", unsafe_allow_html=True)
             col3.markdown(f"<div class='kpi'><h4>Vencidos</h4><h2>{(cron['dias']<0).sum()}</h2></div>", unsafe_allow_html=True)
 
-            st.subheader("Ranking por urgencia")
-            st.dataframe(cron.sort_values("dias"))
+            st.subheader("⚠️ Alertas")
+            for _, r in cron.iterrows():
+                if r["dias"] is not None and r["dias"] <= 3:
+                    st.warning(f"{r['evento']} - {r['dias']} días")
 
+    # PROCESOS
     if menu == "Procesos":
         st.title("📁 Crear proceso")
 
@@ -214,21 +221,36 @@ if st.session_state.rol == "admin":
                 conn.commit()
                 st.success("Proceso guardado")
 
+    # CRONOGRAMA
     if menu == "Cronograma":
         st.title("📅 Cargar cronograma")
 
         idp = st.text_input("ID proceso")
-        texto = st.text_area("Pegar cronograma SECOP")
+        texto = st.text_area("Pegar cronograma")
 
         if st.button("Procesar"):
             for l in texto.split("\n"):
-                evento = limpiar_evento(l)
-                fecha = extraer_fecha(l)
-                if evento and fecha:
+                ev = limpiar_evento(l)
+                f = extraer_fecha(l)
+                if ev and f:
                     conn.execute("INSERT INTO cronograma VALUES (?,?,?)",
-                                 (idp, evento, fecha.strftime("%Y-%m-%d")))
+                                 (idp, ev, f.strftime("%Y-%m-%d")))
             conn.commit()
             st.success("Cronograma guardado")
+
+    # USUARIOS
+    if menu == "Usuarios":
+        st.title("👥 Usuarios")
+
+        df = pd.read_sql("SELECT username, rol, email FROM usuarios", conn)
+        st.dataframe(df)
+
+    # LISTADO
+    if menu == "Listado":
+        st.title("📋 Procesos")
+
+        procesos = pd.read_sql("SELECT * FROM procesos", conn)
+        st.dataframe(procesos)
 
     conn.close()
 
@@ -242,37 +264,27 @@ if st.session_state.rol == "invitado":
     st.title("📊 Mis procesos")
 
     df = pd.read_sql(f"SELECT * FROM procesos WHERE asignado_a='{st.session_state.usuario}'", conn)
-
     st.dataframe(df)
 
     for _, row in df.iterrows():
 
-        st.subheader(f"📌 {row['id']}")
+        st.subheader(f"📌 {row['objeto']}")
 
         cron = pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{row['id']}'", conn)
 
         if not cron.empty:
             cron["fecha"] = pd.to_datetime(cron["fecha"])
             cron["dias"] = cron["fecha"].apply(dias_restantes)
-            cron["estado"] = cron["dias"].apply(estado_proceso)
+            cron["estado"] = cron["dias"].apply(estado)
 
             st.dataframe(cron)
 
-            alertas = generar_alertas(cron, st.session_state.email)
+            alertas = generar_alertas(cron, st.session_state.email, row["objeto"])
 
-            if alertas:
-                st.warning("🔔 Alertas")
-                for a in alertas:
-                    st.write(a)
+            for a in alertas:
+                st.warning(a)
 
-            fig = px.timeline(
-                cron,
-                x_start="fecha",
-                x_end="fecha",
-                y="evento",
-                color="estado"
-            )
-
+            fig = px.timeline(cron, x_start="fecha", x_end="fecha", y="evento", color="estado")
             st.plotly_chart(fig, use_container_width=True)
 
     conn.close()
