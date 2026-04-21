@@ -1,28 +1,17 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
-import hashlib
-import re
+import sqlite3, hashlib, re, os, joblib
 from datetime import datetime
 import plotly.express as px
-import smtplib
-from email.mime.text import MIMEText
 
-st.set_page_config(page_title="Sistema Licitaciones", layout="wide")
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
 
-# =========================
-# 🎨 ESTILO VERDE PRO
-# =========================
-st.markdown("""
-<style>
-.block-container {padding-top: 1rem;}
-.kpi {border-radius: 12px; padding: 15px; background: #064e3b; color: white;}
-.kpi h4 {margin:0; font-size: 0.9rem; color:#a7f3d0}
-.kpi h2 {margin:0; font-size: 1.6rem;}
-.stButton>button {background-color:#16a34a; color:white;}
-.stButton>button:hover {background-color:#15803d;}
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(layout="wide")
 
 # =========================
 # DB
@@ -38,25 +27,29 @@ def crear_db():
         username TEXT PRIMARY KEY,
         password TEXT,
         rol TEXT,
-        email TEXT
+        email TEXT,
+        empresa TEXT
     )""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS procesos(
         id TEXT,
-        entidad TEXT,
+        empresa TEXT,
         objeto TEXT,
         tipo TEXT,
-        exp_general TEXT,
-        exp_especifica TEXT,
-        link TEXT,
-        asignado_a TEXT,
-        valor REAL
+        valor REAL,
+        asignado_a TEXT
     )""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS cronograma(
         id_proceso TEXT,
         evento TEXT,
         fecha TEXT
+    )""")
+
+    c.execute("""CREATE TABLE IF NOT EXISTS historial(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_proceso TEXT,
+        resultado TEXT
     )""")
 
     conn.commit()
@@ -67,224 +60,235 @@ crear_db()
 # =========================
 # SEGURIDAD
 # =========================
-def hash_password(p):
-    return hashlib.sha256(p.encode()).hexdigest()
+def hash_password(p): return hashlib.sha256(p.encode()).hexdigest()
 
-def crear_usuario(u,p,rol,email):
-    conn = get_conn()
+def crear_usuario(u,p,rol,email,empresa):
+    conn=get_conn()
     try:
-        conn.execute("INSERT INTO usuarios VALUES (?,?,?,?)",
-                     (u,hash_password(p),rol,email))
+        conn.execute("INSERT INTO usuarios VALUES (?,?,?,?,?)",
+                     (u,hash_password(p),rol,email,empresa))
         conn.commit()
-    except:
-        pass
+    except: pass
     conn.close()
 
-def verificar_usuario(u,p):
-    conn = get_conn()
-    user = conn.execute("SELECT * FROM usuarios WHERE username=? AND password=?",
-                        (u,hash_password(p))).fetchone()
+def login(u,p):
+    conn=get_conn()
+    user=conn.execute("SELECT * FROM usuarios WHERE username=? AND password=?",
+                      (u,hash_password(p))).fetchone()
     conn.close()
     return user
 
-crear_usuario("admin","1234","admin","tucorreo@gmail.com")
+crear_usuario("admin","1234","admin","admin@mail.com","ADMIN")
 
 # =========================
-# EMAIL
-# =========================
-def enviar_correo(destino, asunto, mensaje):
-    try:
-        remitente = st.secrets["EMAIL_USER"]
-        clave = st.secrets["EMAIL_PASS"]
-
-        msg = MIMEText(mensaje)
-        msg["Subject"] = asunto
-        msg["From"] = remitente
-        msg["To"] = destino
-
-        s = smtplib.SMTP("smtp.gmail.com", 587)
-        s.starttls()
-        s.login(remitente, clave)
-        s.sendmail(remitente, destino, msg.as_string())
-        s.quit()
-    except:
-        pass
-
-# =========================
-# CRONOGRAMA
+# UTILIDADES
 # =========================
 def limpiar_evento(t):
-    t = re.sub(r"\(.*?\)", "", t)
-    t = re.sub(r"\d+.*?(d[ií]as|horas).*?(terminar|transcurrido)", "", t)
+    t=re.sub(r"\(.*?\)","",t)
+    t=re.sub(r"\d+.*?d[ií]as.*?","",t)
     return t.strip()
 
 def extraer_fecha(t):
-    m = re.search(r"\d{2}/\d{2}/\d{4}", t)
-    return datetime.strptime(m.group(), "%d/%m/%Y") if m else None
+    m=re.search(r"\d{2}/\d{2}/\d{4}",t)
+    return datetime.strptime(m.group(),"%d/%m/%Y") if m else None
 
 def dias_restantes(f):
-    return (f - datetime.now()).days if f else None
+    return (f-datetime.now()).days if f else None
 
 def estado(d):
-    if d is None: return "Sin fecha"
-    if d < 0: return "🔴 Vencido"
-    if d <= 3: return "🟡 Próximo"
-    return "🟢 En curso"
+    if d is None:return "Sin fecha"
+    if d<0:return "Vencido"
+    if d<=3:return "Próximo"
+    return "En curso"
 
-def generar_alertas(df, correo, objeto):
-    alertas = []
-    for _, r in df.iterrows():
-        if r["dias"] is not None and r["dias"] <= 3:
-            msg = f"{objeto} | {r['evento']} | {r['dias']} días"
-            alertas.append(msg)
-            enviar_correo(correo, "Alerta Licitación", msg)
-    return alertas
+# =========================
+# IA
+# =========================
+MODEL="modelo.pkl"
+
+def entrenar(conn):
+    df=pd.read_sql("""
+    SELECT p.valor, p.objeto, h.resultado
+    FROM historial h JOIN procesos p ON h.id_proceso=p.id
+    WHERE h.resultado IS NOT NULL
+    """,conn)
+
+    if df.empty:return None
+
+    df["target"]=df["resultado"].apply(lambda x:1 if x=="Ganado" else 0)
+
+    X=df[["valor","objeto"]]
+    y=df["target"]
+
+    prep=ColumnTransformer([
+        ("num",StandardScaler(),["valor"]),
+        ("txt",TfidfVectorizer(max_features=50),"objeto")
+    ])
+
+    model=Pipeline([("prep",prep),("clf",RandomForestClassifier())])
+
+    Xtr,Xte,ytr,yte=train_test_split(X,y,test_size=0.2)
+    model.fit(Xtr,ytr)
+
+    joblib.dump(model,MODEL)
+    return model.score(Xte,yte)
+
+def cargar_modelo():
+    return joblib.load(MODEL) if os.path.exists(MODEL) else None
 
 # =========================
 # LOGIN
 # =========================
 if "login" not in st.session_state:
-    st.session_state.login = False
+    st.session_state.login=False
 
 if not st.session_state.login:
-    st.title("🔐 Login")
-    u = st.text_input("Usuario")
-    p = st.text_input("Contraseña", type="password")
+    st.title("Login")
+    u=st.text_input("Usuario")
+    p=st.text_input("Contraseña",type="password")
 
-    if st.button("Ingresar"):
-        user = verificar_usuario(u,p)
+    if st.button("Entrar"):
+        user=login(u,p)
         if user:
-            st.session_state.login = True
-            st.session_state.usuario = user[0]
-            st.session_state.rol = user[2]
-            st.session_state.email = user[3]
+            st.session_state.login=True
+            st.session_state.user=user[0]
+            st.session_state.rol=user[2]
+            st.session_state.empresa=user[4]
             st.rerun()
-        else:
-            st.error("Credenciales incorrectas")
 
     st.stop()
 
 # =========================
-# SIDEBAR
+# MENU
 # =========================
-st.sidebar.title(f"👤 {st.session_state.usuario}")
-menu = st.sidebar.radio("Menú", ["Dashboard","Procesos","Cronograma","Usuarios","Listado"])
+menu=st.sidebar.radio("Menú",
+["Dashboard","Procesos","Cronograma","Usuarios","Listado"])
+
+conn=get_conn()
 
 # =========================
-# ADMIN
+# DASHBOARD GERENCIAL
 # =========================
-if st.session_state.rol == "admin":
+if menu=="Dashboard":
 
-    conn = get_conn()
+    st.title("💰 Dashboard Gerencial")
 
-    # DASHBOARD
-    if menu == "Dashboard":
-        st.title("📊 Dashboard")
+    df=pd.read_sql(f"""
+    SELECT * FROM procesos
+    WHERE empresa='{st.session_state.empresa}'
+    """,conn)
 
-        cron = pd.read_sql("SELECT * FROM cronograma", conn)
+    if not df.empty:
 
-        if not cron.empty:
-            cron["fecha"] = pd.to_datetime(cron["fecha"])
-            cron["dias"] = cron["fecha"].apply(dias_restantes)
+        total=df["valor"].sum()
+        promedio=df["valor"].mean()
 
-            col1,col2,col3 = st.columns(3)
+        col1,col2=st.columns(2)
+        col1.metric("💰 Valor total en juego",f"${total:,.0f}")
+        col2.metric("📊 Valor promedio",f"${promedio:,.0f}")
 
-            col1.markdown(f"<div class='kpi'><h4>Total eventos</h4><h2>{len(cron)}</h2></div>", unsafe_allow_html=True)
-            col2.markdown(f"<div class='kpi'><h4>Próximos</h4><h2>{(cron['dias']<=3).sum()}</h2></div>", unsafe_allow_html=True)
-            col3.markdown(f"<div class='kpi'><h4>Vencidos</h4><h2>{(cron['dias']<0).sum()}</h2></div>", unsafe_allow_html=True)
+        st.subheader("📊 Ranking por valor")
+        df2=df.sort_values("valor",ascending=False)
 
-            st.subheader("⚠️ Alertas")
-            for _, r in cron.iterrows():
-                if r["dias"] is not None and r["dias"] <= 3:
-                    st.warning(f"{r['evento']} - {r['dias']} días")
+        fig=px.bar(df2,x="valor",y="objeto",orientation="h")
+        st.plotly_chart(fig,use_container_width=True)
 
-    # PROCESOS
-    if menu == "Procesos":
-        st.title("📁 Crear proceso")
+# =========================
+# PROCESOS
+# =========================
+if menu=="Procesos":
+    st.title("Nuevo proceso")
 
-        usuarios = pd.read_sql("SELECT username FROM usuarios WHERE rol='invitado'", conn)
+    with st.form("f"):
+        idp=st.text_input("ID")
+        obj=st.text_area("Objeto")
+        val=st.number_input("Valor",0.0)
 
-        with st.form("form"):
-            idp = st.text_input("ID")
-            entidad = st.text_input("Entidad")
-            objeto = st.text_area("Objeto")
-            tipo = st.text_input("Tipo")
-            expg = st.text_input("Exp General")
-            expe = st.text_input("Exp Específica")
-            link = st.text_input("Link")
-            valor = st.number_input("Valor oferta", 0.0)
-            asignado = st.selectbox("Asignar", usuarios["username"] if not usuarios.empty else [""])
-
-            if st.form_submit_button("Guardar"):
-                conn.execute("INSERT INTO procesos VALUES (?,?,?,?,?,?,?,?,?)",
-                             (idp, entidad, objeto, tipo, expg, expe, link, asignado, valor))
-                conn.commit()
-                st.success("Proceso guardado")
-
-    # CRONOGRAMA
-    if menu == "Cronograma":
-        st.title("📅 Cargar cronograma")
-
-        idp = st.text_input("ID proceso")
-        texto = st.text_area("Pegar cronograma")
-
-        if st.button("Procesar"):
-            for l in texto.split("\n"):
-                ev = limpiar_evento(l)
-                f = extraer_fecha(l)
-                if ev and f:
-                    conn.execute("INSERT INTO cronograma VALUES (?,?,?)",
-                                 (idp, ev, f.strftime("%Y-%m-%d")))
+        if st.form_submit_button("Guardar"):
+            conn.execute("INSERT INTO procesos VALUES (?,?,?,?,?,?)",
+                         (idp,st.session_state.empresa,obj,"",val,st.session_state.user))
             conn.commit()
-            st.success("Cronograma guardado")
-
-    # USUARIOS
-    if menu == "Usuarios":
-        st.title("👥 Usuarios")
-
-        df = pd.read_sql("SELECT username, rol, email FROM usuarios", conn)
-        st.dataframe(df)
-
-    # LISTADO
-    if menu == "Listado":
-        st.title("📋 Procesos")
-
-        procesos = pd.read_sql("SELECT * FROM procesos", conn)
-        st.dataframe(procesos)
-
-    conn.close()
+            st.success("Guardado")
 
 # =========================
-# INVITADO
+# CRONOGRAMA COMPLETO
 # =========================
-if st.session_state.rol == "invitado":
+if menu=="Cronograma":
 
-    conn = get_conn()
+    st.title("Cronograma completo")
 
-    st.title("📊 Mis procesos")
+    idp=st.text_input("ID proceso")
+    txt=st.text_area("Pegar cronograma")
 
-    df = pd.read_sql(f"SELECT * FROM procesos WHERE asignado_a='{st.session_state.usuario}'", conn)
+    if st.button("Procesar"):
+
+        for l in txt.split("\n"):
+            ev=limpiar_evento(l)
+            f=extraer_fecha(l)
+
+            if ev and f:
+                conn.execute("INSERT INTO cronograma VALUES (?,?,?)",(idp,ev,f))
+
+        conn.commit()
+
+    cron=pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{idp}'",conn)
+
+    if not cron.empty:
+
+        cron["fecha"]=pd.to_datetime(cron["fecha"])
+        cron["dias"]=cron["fecha"].apply(dias_restantes)
+        cron["estado"]=cron["dias"].apply(estado)
+
+        st.dataframe(cron)
+
+        fig=px.timeline(cron,x_start="fecha",x_end="fecha",y="evento",color="estado")
+        st.plotly_chart(fig,use_container_width=True)
+
+# =========================
+# USUARIOS (ADMIN)
+# =========================
+if menu=="Usuarios" and st.session_state.rol=="admin":
+
+    st.title("Usuarios")
+
+    u=st.text_input("Usuario")
+    p=st.text_input("Clave",type="password")
+    e=st.text_input("Empresa")
+
+    if st.button("Crear"):
+        crear_usuario(u,p,"invitado","",e)
+        st.success("Usuario creado")
+
+# =========================
+# LISTADO + IA
+# =========================
+if menu=="Listado":
+
+    df=pd.read_sql(f"""
+    SELECT * FROM procesos
+    WHERE empresa='{st.session_state.empresa}'
+    """,conn)
+
     st.dataframe(df)
 
-    for _, row in df.iterrows():
+    if st.button("Entrenar IA"):
+        s=entrenar(conn)
+        if s: st.success(f"Modelo {round(s*100,2)}%")
 
-        st.subheader(f"📌 {row['objeto']}")
+    model=cargar_modelo()
 
-        cron = pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{row['id']}'", conn)
+    for _,row in df.iterrows():
 
-        if not cron.empty:
-            cron["fecha"] = pd.to_datetime(cron["fecha"])
-            cron["dias"] = cron["fecha"].apply(dias_restantes)
-            cron["estado"] = cron["dias"].apply(estado)
+        cron=pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{row['id']}'",conn)
 
-            st.dataframe(cron)
+        if model:
+            prob=model.predict_proba(pd.DataFrame([{
+                "valor":row["valor"],
+                "objeto":row["objeto"]
+            }]))[0][1]
 
-            alertas = generar_alertas(cron, st.session_state.email, row["objeto"])
+            st.write(row["objeto"])
+            st.progress(prob)
+            st.write(f"{int(prob*100)}% probabilidad")
 
-            for a in alertas:
-                st.warning(a)
-
-            fig = px.timeline(cron, x_start="fecha", x_end="fecha", y="evento", color="estado")
-            st.plotly_chart(fig, use_container_width=True)
-
-    conn.close()
+conn.close()
