@@ -41,7 +41,8 @@ if not st.session_state.login:
     st.title("🔑 Acceso al Sistema")
     u = st.text_input("Usuario")
     p = st.text_input("Clave", type="password")
-    if st.button("Entrar", use_container_width=True):
+    # Actualizado width para estándares 2026
+    if st.button("Entrar", width='stretch'):
         res = supabase.table("usuarios").select("*").eq("username", u).eq("password", hash_password(p)).execute()
         if res.data:
             user = res.data[0]
@@ -60,7 +61,6 @@ if not st.session_state.login:
 st.sidebar.title(f"👤 {st.session_state.user}")
 st.sidebar.write(f"🏢 {st.session_state.empresa} ({st.session_state.rol})")
 
-# Invitados solo ven Dashboard y Mis Tareas
 if st.session_state.rol == "admin":
     nav = ["Dashboard", "Mis tareas", "Procesos", "Cronograma", "Usuarios"]
 else:
@@ -72,7 +72,6 @@ if st.sidebar.button("Cerrar Sesión"):
     st.session_state.login = False
     st.rerun()
 
-# Ajuste de zona horaria
 hoy = datetime.now() - timedelta(hours=5)
 
 # =====================================
@@ -98,7 +97,7 @@ if menu == "Dashboard":
         st.divider()
         col_a, col_b = st.columns([1, 2])
         with col_a:
-            st.plotly_chart(px.bar(df_p[df_p['id'] == proc['id']], x="titulo", y="valor", color_discrete_sequence=["#00CC96"]), use_container_width=True)
+            st.plotly_chart(px.bar(df_p[df_p['id'] == proc['id']], x="titulo", y="valor", color_discrete_sequence=["#00CC96"]), width='stretch')
         with col_b:
             res_act = supabase.table("actividades").select("*").eq("id_proceso", proc['id']).execute()
             if res_act.data:
@@ -106,7 +105,7 @@ if menu == "Dashboard":
                 df_act["act_limpia"] = df_act["actividad"].apply(limpiar_actividad_estricto)
                 fig = px.timeline(df_act, x_start="inicio", x_end="fin", y="act_limpia")
                 fig.update_yaxes(autorange="reversed")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
     else:
         st.info("No se encontraron procesos asignados.")
 
@@ -123,7 +122,6 @@ elif menu == "Mis tareas":
     if res_p.data:
         for row in res_p.data:
             with st.expander(f"📌 {row['titulo']} - {row['entidad']}", expanded=True):
-                st.markdown("**Resumen de Requisitos:**")
                 st.write(f"**Objeto:** {row.get('objeto', 'N/A')}")
                 st.write(f"**Exp. General:** {row.get('exp_general', 'N/A')}")
                 
@@ -133,7 +131,8 @@ elif menu == "Mis tareas":
                     df_a["act_limpia"] = df_a["actividad"].apply(limpiar_actividad_estricto)
                     df_a["fin"] = pd.to_datetime(df_a["fin"])
                     df_a["Estado"] = df_a["fin"].apply(lambda f: "🔴 Cerrado" if (f-hoy).days < 0 else ("🟡 Próximo" if (f-hoy).days <= 3 else "🟢 Activo"))
-                    st.dataframe(df_a[["act_limpia", "fin", "Estado"]].sort_values("fin"), use_container_width=True, hide_index=True)
+                    # Actualizado width para dataframes en 2026
+                    st.dataframe(df_a[["act_limpia", "fin", "Estado"]].sort_values("fin"), width='stretch', hide_index=True)
 
 # =====================================
 # 7. PROCESOS (ADMIN)
@@ -198,7 +197,7 @@ elif menu == "Usuarios":
         res_u = supabase.table("usuarios").select("username, rol, empresa").execute()
         if res_u.data:
             df_u = pd.DataFrame(res_u.data)
-            st.dataframe(df_u, use_container_width=True, hide_index=True)
+            st.dataframe(df_u, width='stretch', hide_index=True)
             
             st.divider()
             st.subheader("🔑 Cambiar Contraseña")
