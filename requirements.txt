@@ -1,6 +1,7 @@
 streamlit
 pandas
 plotly
+supabase
 scikit-learn
 joblib
-supabase
+
