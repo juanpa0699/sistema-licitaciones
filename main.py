@@ -11,7 +11,6 @@ from supabase import create_client
 SUPABASE_URL = "https://fszpctbemyrcoktcemfd.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZzenBjdGJlbXlyY29rdGNlbWZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY5Nzg2ODgsImV4cCI6MjA5MjU1NDY4OH0.p3uBZXkfNlzAqQJEpc0elHPEfDhNCQsHEF_Gi7AyBWk"
 
-# Inicialización segura de Supabase
 try:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
@@ -27,7 +26,6 @@ def hash_password(p):
 
 def limpiar_actividad_estricto(texto):
     if not texto: return ""
-    # Limpieza de muletillas de tiempo SECOP
     texto = re.sub(r"\d+\s+(de|para|terminar|hora|horas|minutos|min|días|segundos).*", "", texto, flags=re.IGNORECASE)
     palabras_basura = [r"\btiempo transcurrido\b", r"\btranscurrido\b", r"\bBogotá\b", r"\bUTC\b", r"\bAM\b", r"\bPM\b"]
     for patron in palabras_basura:
@@ -68,7 +66,6 @@ if not st.session_state.login:
 st.sidebar.title(f"👤 {st.session_state.user}")
 st.sidebar.markdown(f"**Rol:** `{st.session_state.rol.upper()}`")
 
-# FILTRO DE MENÚ: Solo admin ve Procesos, Cronograma y Usuarios
 if st.session_state.rol == "admin":
     nav_options = ["Dashboard", "Mis tareas", "Procesos", "Cronograma", "Usuarios"]
 else:
@@ -80,7 +77,6 @@ if st.sidebar.button("Cerrar Sesión", icon="🚀"):
     st.session_state.login = False
     st.rerun()
 
-# Fecha actual ajustada (Colombia UTC-5)
 hoy = datetime.now() - timedelta(hours=5)
 
 # =====================================
@@ -132,14 +128,14 @@ elif menu == "Mis tareas":
         for row in res.data:
             with st.expander(f"📌 {row['titulo']} - {row['entidad']}", expanded=True):
                 st.markdown(f"**Objeto:** {row.get('objeto', 'No definido')}")
-                st.markdown(f"**Experiencia:** {row.get('exp_general', 'No definida')}")
+                st.markdown(f"**Experiencia General:** {row.get('exp_general', 'No definida')}")
+                st.markdown(f"**Experiencia Específica:** {row.get('exp_especifica', 'No definida')}")
                 
                 res_a = supabase.table("actividades").select("*").eq("id_proceso", row['id']).execute()
                 if res_a.data:
                     df_a = pd.DataFrame(res_a.data)
                     df_a["act_limpia"] = df_a["actividad"].apply(limpiar_actividad_estricto)
                     df_a["fin"] = pd.to_datetime(df_a["fin"])
-                    # Lógica de Semáforo
                     df_a["Estado"] = df_a["fin"].apply(lambda f: "🔴 Cerrado" if (f-hoy).days < 0 else ("🟡 Próximo (3d)" if (f-hoy).days <= 3 else "🟢 Activo"))
                     st.dataframe(df_a[["act_limpia", "fin", "Estado"]].sort_values("fin"), width='stretch', hide_index=True)
 
@@ -158,12 +154,18 @@ elif menu == "Procesos" and st.session_state.rol == "admin":
         val = c2.number_input("Valor", min_value=0.0)
         ent = c2.text_input("Entidad")
         obj = st.text_area("Objeto del contrato")
+        
+        # NUEVOS CAMPOS AÑADIDOS
+        exp_gen = st.text_area("Experiencia General")
+        exp_esp = st.text_area("Experiencia Específica")
+        
         asig = st.selectbox("Asignar a Responsable:", lista_users)
         
         if st.form_submit_button("Crear Proceso"):
             supabase.table("procesos").insert({
                 "id": idp, "titulo": tit, "valor": val, "entidad": ent, 
-                "objeto": obj, "asignado_a": asig, "empresa": st.session_state.empresa
+                "objeto": obj, "exp_general": exp_gen, "exp_especifica": exp_esp,
+                "asignado_a": asig, "empresa": st.session_state.empresa
             }).execute()
             st.success("Proceso registrado exitosamente.")
 
