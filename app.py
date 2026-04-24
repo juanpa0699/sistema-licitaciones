@@ -1,382 +1,221 @@
 import streamlit as st
 import pandas as pd
-import sqlite3, hashlib, re, os
-from datetime import datetime
+import hashlib, re
+from datetime import datetime, timedelta
 import plotly.express as px
+from supabase import create_client
 
-# =========================
-# IMPORTS SEGUROS (IA)
-# =========================
-try:
-    import joblib
-    from sklearn.model_selection import train_test_split
-    from sklearn.pipeline import Pipeline
-    from sklearn.compose import ColumnTransformer
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.ensemble import RandomForestClassifier
-    SKLEARN_OK = True
-except:
-    SKLEARN_OK = False
+# =====================================
+# 1. CONFIGURACIÓN Y CONEXIÓN
+# =====================================
+SUPABASE_URL = "https://fszpctbemyrcoktcemfd.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZzenBjdGJlbXlyY29rdGNlbWZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY5Nzg2ODgsImV4cCI6MjA5MjU1NDY4OH0.p3uBZXkfNlzAqQJEpc0elHPEfDhNCQsHEF_Gi7AyBWk"
 
-st.set_page_config(layout="wide")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# =========================
-# DB
-# =========================
-def get_conn():
-    conn = sqlite3.connect("licitaciones.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+st.set_page_config(layout="wide", page_title="Sistema de Gestión de Licitaciones")
 
-def crear_db():
-    conn = get_conn()
-    c = conn.cursor()
-
-    c.execute("""CREATE TABLE IF NOT EXISTS usuarios(
-        username TEXT PRIMARY KEY,
-        password TEXT,
-        rol TEXT,
-        email TEXT,
-        empresa TEXT
-    )""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS procesos(
-        id TEXT,
-        empresa TEXT,
-        objeto TEXT,
-        tipo TEXT,
-        valor REAL,
-        asignado_a TEXT
-    )""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS cronograma(
-        id_proceso TEXT,
-        evento TEXT,
-        fecha TEXT
-    )""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS historial(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        id_proceso TEXT,
-        resultado TEXT
-    )""")
-
-    # 🔧 FIX BD antigua
-    try: c.execute("ALTER TABLE usuarios ADD COLUMN empresa TEXT")
-    except: pass
-
-    conn.commit()
-    conn.close()
-
-crear_db()
-
-# =========================
-# SEGURIDAD
-# =========================
+# =====================================
+# 2. FUNCIONES DE APOYO
+# =====================================
 def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
-def crear_usuario(u,p,rol,email,empresa):
-    conn = get_conn()
-    try:
-        conn.execute("INSERT INTO usuarios VALUES (?,?,?,?,?)",
-                     (u,hash_password(p),rol,email,empresa))
-        conn.commit()
-    except:
-        pass
-    conn.close()
+def limpiar_actividad_estricto(texto):
+    if not texto: return ""
+    texto = re.sub(r"\d+\s+(de|para|terminar|hora|horas|minutos|min|días|segundos).*", "", texto, flags=re.IGNORECASE)
+    palabras_basura = [r"\btiempo transcurrido\b", r"\btranscurrido\b", r"\bBogotá\b", r"\bUTC\b", r"\bAM\b", r"\bPM\b"]
+    for patron in palabras_basura:
+        texto = re.sub(patron, "", texto, flags=re.IGNORECASE)
+    texto = re.sub(r"\d{1,2}/\d{1,2}/\d{4}.*", "", texto) 
+    texto = re.sub(r"[\(\)\-\:\,]", "", texto)
+    return " ".join(texto.split()).strip()
 
-def login(u,p):
-    conn = get_conn()
-    user = conn.execute(
-        "SELECT * FROM usuarios WHERE username=? AND password=?",
-        (u,hash_password(p))
-    ).fetchone()
-    conn.close()
-    return user
-
-crear_usuario("admin","1234","admin","admin@mail.com","ADMIN")
-
-# =========================
-# UTILIDADES
-# =========================
-def limpiar_evento(t):
-    t = re.sub(r"\(.*?\)", "", t)
-    t = re.sub(r"\d+.*?d[ií]as.*?", "", t)
-    return t.strip()
-
-def extraer_fecha(t):
-    m = re.search(r"\d{2}/\d{2}/\d{4}", t)
-    return datetime.strptime(m.group(), "%d/%m/%Y") if m else None
-
-def dias_restantes(f):
-    return (f - datetime.now()).days if f else None
-
-# =========================
-# IA
-# =========================
-MODEL = "modelo.pkl"
-
-def entrenar(conn):
-    if not SKLEARN_OK:
-        return None
-
-    df = pd.read_sql("""
-    SELECT p.valor, p.objeto, h.resultado
-    FROM historial h JOIN procesos p ON h.id_proceso=p.id
-    WHERE h.resultado IS NOT NULL
-    """, conn)
-
-    if df.empty:
-        return None
-
-    df["target"] = df["resultado"].apply(lambda x: 1 if x=="Ganado" else 0)
-
-    X = df[["valor","objeto"]]
-    y = df["target"]
-
-    prep = ColumnTransformer([
-        ("num", StandardScaler(), ["valor"]),
-        ("txt", TfidfVectorizer(max_features=50), "objeto")
-    ])
-
-    model = Pipeline([
-        ("prep", prep),
-        ("clf", RandomForestClassifier())
-    ])
-
-    Xtr,Xte,ytr,yte = train_test_split(X,y,test_size=0.2)
-    model.fit(Xtr,ytr)
-
-    joblib.dump(model, MODEL)
-    return model.score(Xte,yte)
-
-def cargar_modelo():
-    if not SKLEARN_OK:
-        return None
-    return joblib.load(MODEL) if os.path.exists(MODEL) else None
-
-# =========================
-# LOGIN
-# =========================
+# =====================================
+# 3. MANEJO DE SESIÓN Y LOGIN
+# =====================================
 if "login" not in st.session_state:
     st.session_state.login = False
 
 if not st.session_state.login:
-    st.title("Login")
-
-    u = st.text_input("Usuario")
-    p = st.text_input("Contraseña", type="password")
-
-    if st.button("Entrar"):
-        user = login(u,p)
-        if user:
-            st.session_state.login = True
-            st.session_state.user = user["username"]
-            st.session_state.rol = user["rol"]
-            st.session_state.empresa = user["empresa"] if user["empresa"] else "DEFAULT"
-            st.rerun()
-
-    st.stop()
-
-# =========================
-# MENU
-# =========================
-menu = st.sidebar.radio("Menú",
-["Dashboard","Procesos","Cronograma","Usuarios","Listado"])
-
-conn = get_conn()
-
-# =========================
-# DASHBOARD
-# =========================
-if menu == "Dashboard":
-
-    st.title("💰 Dashboard Gerencial")
-
-    df = pd.read_sql(f"""
-    SELECT * FROM procesos
-    WHERE empresa='{st.session_state.empresa}'
-    """, conn)
-
-    if not df.empty:
-        st.metric("Valor total", f"${df['valor'].sum():,.0f}")
-
-        fig = px.bar(df.sort_values("valor"), x="valor", y="objeto", orientation="h")
-        st.plotly_chart(fig, use_container_width=True)
-
-# =========================
-# PROCESOS
-# =========================
-if menu == "Procesos":
-
-    st.title("📁 Nuevo proceso")
-
-    with st.form("form_proceso"):
-
-        idp = st.text_input("ID")
-        objeto = st.text_area("Objeto")
-
-        tipo = st.selectbox("Tipo de proceso", [
-            "Licitación pública",
-            "Selección abreviada",
-            "Contratación directa",
-            "Mínima cuantía"
-        ])
-
-        valor = st.number_input("Valor", 0.0)
-
-        if st.form_submit_button("Guardar"):
-
-            conn.execute("""
-            INSERT INTO procesos VALUES (?,?,?,?,?,?)
-            """, (
-                idp,
-                st.session_state.empresa,
-                objeto,
-                tipo,
-                valor,
-                st.session_state.user
-            ))
-
-            conn.commit()
-            st.success("Proceso guardado")
-
-# =========================
-# CRONOGRAMA
-# =========================
-if menu == "Cronograma":
-
-    st.title("📅 Cronograma")
-
-    idp = st.text_input("ID proceso")
-    txt = st.text_area("Pegar cronograma")
-
-    if st.button("Procesar"):
-
-        for l in txt.split("\n"):
-            ev = limpiar_evento(l)
-            f = extraer_fecha(l)
-
-            if ev and f:
-                conn.execute(
-                    "INSERT INTO cronograma VALUES (?,?,?)",
-                    (idp, ev, f)
-                )
-
-        conn.commit()
-        st.success("Cronograma guardado")
-
-    cron = pd.read_sql(f"SELECT * FROM cronograma WHERE id_proceso='{idp}'", conn)
-
-    if not cron.empty:
-
-        cron["fecha"] = pd.to_datetime(cron["fecha"])
-        cron = cron.sort_values("fecha")
-
-        # 🔥 GENERAR INICIO Y FIN (tipo proyecto)
-        cron["inicio"] = cron["fecha"]
-        cron["fin"] = cron["fecha"].shift(-1)
-
-        # última fila
-        cron["fin"] = cron["fin"].fillna(cron["fecha"])
-
-        # estado
-        hoy = datetime.now()
-        cron["estado"] = cron["fin"].apply(
-            lambda x: "🔴 Vencido" if x < hoy else ("🟡 Próximo" if (x - hoy).days <= 3 else "🟢 En curso")
-        )
-
-        st.subheader("📊 Diagrama de Gantt")
-
-        fig = px.timeline(
-            cron,
-            x_start="inicio",
-            x_end="fin",
-            y="evento",
-            color="estado",
-            color_discrete_map={
-                "🔴 Vencido": "red",
-                "🟡 Próximo": "orange",
-                "🟢 En curso": "green"
-            }
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.dataframe(cron)
-
-# =========================
-# USUARIOS
-# =========================
-if menu == "Usuarios" and st.session_state.rol == "admin":
-
+    st.title("🔑 Acceso al Sistema")
     u = st.text_input("Usuario")
     p = st.text_input("Clave", type="password")
-    e = st.text_input("Empresa")
-
-    if st.button("Crear"):
-        crear_usuario(u,p,"invitado","",e)
-        st.success("Usuario creado")
-
-# =========================
-# LISTADO + IA
-# =========================
-if menu == "Listado":
-
-    df = pd.read_sql(f"""
-    SELECT * FROM procesos
-    WHERE empresa='{st.session_state.empresa}'
-    """, conn)
-
-    st.dataframe(df)
-
-    if not SKLEARN_OK:
-        st.warning("Instala scikit-learn y joblib para activar IA")
-
-    if st.button("Entrenar IA"):
-        score = entrenar(conn)
-        if score:
-            st.success(f"Modelo entrenado: {round(score*100,2)}%")
-
-    model = cargar_modelo()
-
-    for _, row in df.iterrows():
-
-        if model:
-            prob = model.predict_proba(pd.DataFrame([{
-                "valor": row["valor"],
-                "objeto": row["objeto"]
-            }]))[0][1]
-
-            st.write(row["objeto"])
-            st.progress(prob)
-            st.write(f"{int(prob*100)}%")
-            if menu == "Listado":
-
-    df = pd.read_sql(f"""
-    SELECT * FROM procesos
-    WHERE empresa='{st.session_state.empresa}'
-    """, conn)
-
-    st.dataframe(df)
-
-    st.subheader("🗑️ Eliminar proceso")
-
-    if not df.empty:
-
-        sel = st.selectbox("Seleccionar proceso", df["id"])
-
-        if st.button("Eliminar proceso"):
-
-            conn.execute("DELETE FROM procesos WHERE id=?", (sel,))
-            conn.execute("DELETE FROM cronograma WHERE id_proceso=?", (sel,))
-            conn.execute("DELETE FROM historial WHERE id_proceso=?", (sel,))
-
-            conn.commit()
-
-            st.success("Proceso eliminado")
+    if st.button("Entrar", use_container_width=True):
+        res = supabase.table("usuarios").select("*").eq("username", u).eq("password", hash_password(p)).execute()
+        if res.data:
+            user = res.data[0]
+            st.session_state.update({
+                "login": True, "user": user["username"], 
+                "rol": user["rol"], "empresa": user["empresa"]
+            })
             st.rerun()
+        else:
+            st.error("Credenciales incorrectas.")
+    st.stop()
 
-conn.close()
+# =====================================
+# 4. NAVEGACIÓN LATERAL (FILTRADA POR ROL)
+# =====================================
+st.sidebar.title(f"👤 {st.session_state.user}")
+st.sidebar.write(f"🏢 {st.session_state.empresa} ({st.session_state.rol})")
+
+# Lógica solicitada: Invitados solo Dashboard y Mis Tareas
+if st.session_state.rol == "admin":
+    nav = ["Dashboard", "Mis tareas", "Procesos", "Cronograma", "Usuarios"]
+else:
+    nav = ["Dashboard", "Mis tareas"]
+
+menu = st.sidebar.radio("Navegación", nav)
+
+if st.sidebar.button("Cerrar Sesión"):
+    st.session_state.login = False
+    st.rerun()
+
+# Fecha de hoy ajustada (Colombia UTC-5)
+hoy = datetime.now() - timedelta(hours=5)
+
+# =====================================
+# 5. DASHBOARD
+# =====================================
+if menu == "Dashboard":
+    st.header("📊 Análisis por Contrato")
+    query = supabase.table("procesos").select("*")
+    if st.session_state.rol != "admin":
+        query = query.eq("asignado_a", st.session_state.user)
+    
+    res_p = query.execute()
+    if res_p.data:
+        df_p = pd.DataFrame(res_p.data)
+        sel = st.selectbox("Seleccione un proceso:", df_p['titulo'].tolist())
+        proc = df_p[df_p['titulo'] == sel].iloc[0]
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("💰 Presupuesto", f"${proc['valor']:,.0f}")
+        c2.metric("🏛️ Entidad", proc['entidad'])
+        c3.metric("🆔 ID", proc['id'])
+
+        st.divider()
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            st.plotly_chart(px.bar(df_p[df_p['id'] == proc['id']], x="titulo", y="valor", color_discrete_sequence=["#00CC96"]), use_container_width=True)
+        with col_b:
+            res_act = supabase.table("actividades").select("*").eq("id_proceso", proc['id']).execute()
+            if res_act.data:
+                df_act = pd.DataFrame(res_act.data)
+                df_act["act_limpia"] = df_act["actividad"].apply(limpiar_actividad_estricto)
+                fig = px.timeline(df_act, x_start="inicio", x_end="fin", y="act_limpia")
+                fig.update_yaxes(autorange="reversed")
+                st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No hay procesos asignados.")
+
+# =====================================
+# 6. MIS TAREAS
+# =====================================
+if menu == "Mis tareas":
+    st.header("📅 Mis Compromisos")
+    query = supabase.table("procesos").select("*")
+    if st.session_state.rol != "admin":
+        query = query.eq("asignado_a", st.session_state.user)
+    
+    res_p = query.execute()
+    if res_p.data:
+        for row in res_p.data:
+            with st.expander(f"📌 {row['titulo']} - {row['entidad']}", expanded=True):
+                st.table(pd.DataFrame({
+                    "Campo": ["Objeto", "Exp. General", "Exp. Específica"],
+                    "Detalle": [row.get('objeto', 'N/A'), row.get('exp_general', 'N/A'), row.get('exp_especifica', 'N/A')]
+                }))
+                res_a = supabase.table("actividades").select("*").eq("id_proceso", row['id']).execute()
+                if res_a.data:
+                    df_a = pd.DataFrame(res_a.data)
+                    df_a["act_limpia"] = df_a["actividad"].apply(limpiar_actividad_estricto)
+                    df_a["fin"] = pd.to_datetime(df_a["fin"])
+                    df_a["Estado"] = df_a["fin"].apply(lambda f: "🔴 Cerrado" if (f-hoy).days < 0 else ("🟡 Próximo" if (f-hoy).days <= 3 else "🟢 Activo"))
+                    st.dataframe(df_a[["act_limpia", "fin", "Estado"]].sort_values("fin"), use_container_width=True, hide_index=True)
+
+# =====================================
+# 7. PROCESOS (ADMIN)
+# =====================================
+if menu == "Procesos":
+    st.header("🆕 Registro de Licitación")
+    res_users = supabase.table("usuarios").select("username").execute()
+    lista_usuarios = [u['username'] for u in res_users.data] if res_users.data else [st.session_state.user]
+
+    with st.form("form_proc"):
+        c1, c2 = st.columns(2)
+        idp = c1.text_input("ID Proceso")
+        tit = c1.text_input("Título")
+        val = c2.number_input("Valor", min_value=0.0)
+        ent = c2.text_input("Entidad")
+        obj = st.text_area("Objeto")
+        exp_g = st.text_area("Exp. General")
+        exp_e = st.text_area("Exp. Específica")
+        asig = st.selectbox("Asignar a:", lista_usuarios)
+        if st.form_submit_button("Guardar Proceso"):
+            supabase.table("procesos").insert({"id": idp, "titulo": tit, "valor": val, "entidad": ent, "objeto": obj, "exp_general": exp_g, "exp_especifica": exp_e, "asignado_a": asig, "empresa": st.session_state.empresa}).execute()
+            st.success("Guardado.")
+
+# =====================================
+# 8. CRONOGRAMA (ADMIN)
+# =====================================
+if menu == "Cronograma":
+    st.header("⏳ Cargar Cronograma")
+    res_c = supabase.table("procesos").select("id, titulo").execute()
+    if res_c.data:
+        df_c = pd.DataFrame(res_c.data)
+        proc_sel = st.selectbox("Proceso:", df_c['titulo'].tolist())
+        id_ref = df_c[df_c['titulo'] == proc_sel].iloc[0]['id']
+        txt = st.text_area("Pegue texto de SECOP")
+        if st.button("Vincular"):
+            for linea in txt.split("\n"):
+                m = re.search(r"\d{1,2}/\d{1,2}/\d{4}", linea)
+                if m:
+                    supabase.table("actividades").insert({"id_proceso": id_ref, "actividad": linea, "inicio": hoy.isoformat(), "fin": datetime.strptime(m.group(), "%d/%m/%Y").isoformat()}).execute()
+            st.success("Cronograma cargado.")
+
+# =====================================
+# 9. USUARIOS (ADMIN - GESTIÓN TOTAL)
+# =====================================
+if menu == "Usuarios" and st.session_state.rol == "admin":
+    st.header("👤 Gestión de Usuarios")
+    
+    t_lista, t_nuevo, t_borrar = st.tabs(["👥 Lista de Usuarios", "➕ Crear Nuevo", "🗑️ Eliminar Proceso"])
+    
+    with t_lista:
+        res_u = supabase.table("usuarios").select("username, rol, empresa").execute()
+        if res_u.data:
+            df_u = pd.DataFrame(res_u.data)
+            st.dataframe(df_u, use_container_width=True)
+            
+            st.divider()
+            st.subheader("🔑 Cambiar Contraseña")
+            user_to_mod = st.selectbox("Seleccione usuario para cambiar clave:", df_u['username'].tolist())
+            new_pass = st.text_input("Nueva Clave", type="password")
+            if st.button("Actualizar Clave"):
+                supabase.table("usuarios").update({"password": hash_password(new_pass)}).eq("username", user_to_mod).execute()
+                st.success(f"Clave de {user_to_mod} actualizada.")
+
+    with t_nuevo:
+        with st.form("f_new_user"):
+            nu = st.text_input("Username")
+            np = st.text_input("Password", type="password")
+            ne = st.text_input("Empresa", value=st.session_state.empresa)
+            nr = st.selectbox("Rol", ["invitado", "admin"])
+            if st.form_submit_button("Registrar"):
+                supabase.table("usuarios").insert({"username": nu, "password": hash_password(np), "rol": nr, "email": f"{nu}@mail.com", "empresa": ne}).execute()
+                st.success(f"Usuario {nu} creado.")
+                st.rerun()
+
+    with t_borrar:
+        st.subheader("⚠️ Zona de Peligro")
+        res_del = supabase.table("procesos").select("id, titulo").execute()
+        if res_del.data:
+            df_del = pd.DataFrame(res_del.data)
+            borrar = st.selectbox("Eliminar proceso:", df_del['titulo'].tolist())
+            if st.button("❌ ELIMINAR PROCESO"):
+                id_b = df_del[df_del['titulo'] == borrar].iloc[0]['id']
+                supabase.table("procesos").delete().eq("id", id_b).execute()
+                st.warning("Eliminado.")
+                st.rerun()
